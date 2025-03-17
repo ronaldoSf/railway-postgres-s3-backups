@@ -29,11 +29,35 @@ const createBackup = async (databaseUrl: string) => {
   
   try {
     // Run pg_dump with gzip compression using the full database URL
-    await execPromise(`${process.env.PG_DUMP_PATH}pg_dump --dbname="${databaseUrl}" -F p | gzip > "${filePath}"`);
-    console.log(`Backup created at ${filePath}`);
+    const { stdout, stderr } = await execPromise(`${process.env.PG_DUMP_PATH}pg_dump --dbname="${databaseUrl}" -F p | gzip > "${filePath}"`);
+    
+    // Check if there was any stderr output (which might indicate an error)
+    if (stderr && stderr.trim() !== '') {
+      console.error('pg_dump stderr:', stderr);
+      throw new Error(`pg_dump error: ${stderr}`);
+    }
+    
+    // Check if the file exists and is not empty (min size for a valid gzip file)
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile() || stats.size < 20) {
+      throw new Error('Backup file is empty or too small, likely failed');
+    }
+    
+    console.log(`Backup created at ${filePath} (${stats.size} bytes)`);
     return { filePath, filename };
   } catch (error) {
     console.error('Error creating backup:', error);
+    
+    // Check if the file was created but is invalid/empty
+    if (fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+        console.log(`Removed invalid backup file: ${filePath}`);
+      } catch (unlinkError) {
+        console.error('Failed to remove invalid backup file:', unlinkError);
+      }
+    }
+    
     throw error;
   }
 };
@@ -104,36 +128,29 @@ const performBackup = async () => {
   }
 };
 
-// Determine whether to run once or schedule based on environment variables
 const initialize = () => {
-  const cronInterval = process.env.CRON_JOB_INTERVAL;
-  
-  // Validate if database URL is set
   if (!process.env.BACKUP_DATABASE_URL) {
     console.error('BACKUP_DATABASE_URL environment variable is not set');
     process.exit(1);
   }
   
-  // If cron interval is empty or invalid, run once
-  if (!cronInterval || cronInterval.trim() === '' || cronInterval.includes('#')) {
-    console.log('No valid CRON_JOB_INTERVAL provided, running backup once');
-    performBackup();
-  } else {
-    // Otherwise, set up scheduled backups
+  const cronInterval = process.env.CRON_JOB_INTERVAL;
+
+  if (cronInterval && cronInterval.trim() !== '') {
     try {
       scheduleBackup(cronInterval);
     } catch (error) {
       console.error('Invalid CRON_JOB_INTERVAL format:', error);
-      console.log('Running backup once instead');
-      performBackup();
     }
+  }
+
+  if (process.env.RUN_ON_STARTUP === 'true') {
+    performBackup();
   }
 };
 
-// Run based on environment settings
-if (process.env.RUN_ON_STARTUP === 'true' || !process.env.RUN_ON_STARTUP) {
-  initialize();
-}
+initialize();
+
 
 // Export the functions for use in other scripts
 export { performBackup, scheduleBackup, initialize };
